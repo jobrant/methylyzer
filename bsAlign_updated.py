@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# (c) 2013, Russell Darst, University of Florida
 # Rewritten 2025, Jason Orr Brant, University of Florida Health Cancer Institute
 
 """
@@ -8,7 +7,7 @@
 * returns SQL table
 * user can choose to align on either or both strands
 * works for cytosine methylation in any context (CG, GC, etc.)
-* uses fastools, makeblastdb, blastn
+* uses makeblastdb, blastn
 * RPD4 2013
 """
 
@@ -116,17 +115,31 @@ def deaminate(source, strand='ab'):
         # Determine conversion flag for faconvert
         # Assuming: empty string or nothing = C->T (Watson/'a' strand)
         # "GA" = G->A (Crick/'b' strand)
-        conv_type = "GA" if i == 'b' else ""
+        
+        # conv_type = "GA" if i == 'b' else ""
 
         # Run faconvert and capture its stdout directly
         try:
-            result = run(
-                ['faconvert', source, conv_type],
-                stdout=PIPE,
-                stderr=PIPE,
-                check=True,
-                text=True
-            )
+            if i == 'b':
+                # G to A conversion for b strand
+                result = run(
+                    ['faconvert', source, 'GA'],
+                    stdout=PIPE,
+                    stderr=PIPE,
+                    check=True,
+                    text=True
+                )
+            else:
+                # C to T conversion for a strand (default)
+                result = run(
+                    ['faconvert', source, 'CT'],
+                    stdout=PIPE,
+                    stderr=PIPE,
+                    check=True,
+                    text=True
+                )
+
+            
         except CalledProcessError as e:
             raise RuntimeError(f"faconvert failed for strand '{i}': {e.stderr.strip()}")
 
@@ -155,30 +168,27 @@ def deaminate(source, strand='ab'):
 ##############################################################################
 
 def parse(whichFile):
+    total_alignments = 0
     for record in NCBIXML.parse(open(whichFile, 'r')):
         # Get best alignments (same as before)
         EI = [(alignment.hsps[0].expect, i)
               for i, alignment in enumerate(record.alignments)]
         EI.sort()
         for e, i in EI:
-            if e / 10 > EI[0][0]:  # note: > not <= to avoid floating point issues
+            if e / 10 <= EI[0][0]:
+                total_alignments += 1
+                alignment = record.alignments[i]
+                hsp = alignment.hsps[0]
+                
+                Q = record.query.split()[0].split('.')
+                S = alignment.accession.split('.')
+                qStr, Sstr = Q[-1], S[-1]
+                qID, sID = '.'.join(Q[:-1]), '.'.join(S[:-1])
+
+                yield sID, qID, hsp.expect, hsp.sbjct_start, hsp.sbjct_end, hsp.query_start, hsp.query_end, hsp.sbjct, hsp.query
+            else:  
                 break
-            alignment = record.alignments[i]
-            hsp = alignment.hsps[0]
-            # Clean query ID
-            query_full = record.query.split(' ', 1)[0]  # strip description
-            # Remove /fwd or /rev if present
-            if '/fwd' in query_full or '/rev' in query_full:
-                query_full = '/'.join(query_full.split('/')[:-1])
-            # Remove strand suffix if present
-            query_id = query_full[:-2] if query_full.endswith(('.a', '.b')) else query_full
-            # Subject ID (accession is clean, but BLAST sometimes adds suffix)
-            subject_id = alignment.accession
-            if subject_id.endswith(('.a', '.b')):
-                subject_id = subject_id[:-2]
-            yield subject_id, query_id, \
-                  hsp.expect, hsp.sbjct_start, hsp.sbjct_end, \
-                  hsp.query_start, hsp.query_end, hsp.sbjct, hsp.query
+    print(f"Debug: parse() yielded {total_alignments} total alignments")
 
 ##############################################################################
 
@@ -203,7 +213,7 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
             start = time()
             print('Converting bases ...')
             deaminate(seqs, strand)
-            deaminate(refs)
+            deaminate(refs, 'ab')
             print(f"DEBUG: Query file created: {Q}")
             print(f"DEBUG: Subject file created: {S}")
             
@@ -278,6 +288,7 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
         curs.execute('CREATE INDEX IF NOT EXISTS rls_idx ON records '
                      '(read, locus, strand)')
         
+        failed_lookups = 0
         for S_hit, Q_hit, e, s5, s3, q5, q3, sBS, qBS in parse(X):
             # Use the clean IDs from parse()
             qID = Q_hit.split(' ', 1)[0].strip()
@@ -302,6 +313,10 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
                     break
             
             if qSeq is None or sSeq is None:
+                failed_lookups += 1
+                if failed_lookups <= 10:  # Show first 10 failures
+                    print(f"Failed lookup: qID='{qID}', sID='{sID}'")
+                    print(f"  Available query IDs: {[k for k in seqs_index.keys() if 'query_pattern' in k][:5]}")
                 # Only show warning for truly missing sequences
                 continue
             
@@ -348,6 +363,7 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
             curs.execute('INSERT INTO records VALUES (NULL,?,?,?,?,?,?)',
                          (read_id, expt, sID, e, sStr, str(seq).upper()))
         print('in', time() - start)
+        print(f"Total failed sequence lookups: {failed_lookups}")
         print('Adding refs ...')
         
         start = time()
@@ -454,8 +470,9 @@ def run_BLAST(query, subject, XML, mask):
 
     cmd = [
         bn, 
-        '-task', 'megablast',
-        '-evalue', '0.001',
+        '-task', 'megablast', 
+        '-dust', '50 64 1',
+        '-evalue', '0.001', 
         '-max_target_seqs', '10',
         '-outfmt', '5',
         '-query', query,

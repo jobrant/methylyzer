@@ -35,42 +35,47 @@ class MethylationAnalyzer:
         """
         Classify methylation state based on reference and sequence bases.
         
-        For HCG/GCH sites:
-        - C positions: C=methylated, T=unmethylated, other=ambiguous
-        - G positions: G=methylated, A=unmethylated, other=ambiguous
-        - H positions: ignored for methylation calling
+        For HCG sites: H(0) C(1) G(2) - only positions 1,2 are methylatable
+        For GCH sites: G(0) C(1) H(2) - only positions 0,1 are methylatable
         
-        Returns: 'M' (methylated), 'U' (unmethylated), 'N' (ambiguous/gap)
+        Returns: 'M' (methylated), 'U' (unmethylated), 'N' (ambiguous/gap), 'H' (context)
         """
         if ref_base == '-' or seq_base == '-' or seq_base == 'N':
             return 'N'
         
         ref_base = ref_base.upper()
         seq_base = seq_base.upper()
-        
-        # Determine if this position should be analyzed based on site type
         site_upper = site.upper()
         
-        if site_upper in ['HCG', 'GCH', 'CG']:
-            if ref_base == 'C':
-                if seq_base == 'C':
-                    return 'M'  # Methylated C
-                elif seq_base == 'T':
-                    return 'U'  # Unmethylated C (converted to T)
-                else:
-                    return 'N'  # Ambiguous
-            elif ref_base == 'G':
-                if seq_base == 'G':
-                    return 'M'  # Methylated G
-                elif seq_base == 'A':
-                    return 'U'  # Unmethylated G (converted to A)
-                else:
-                    return 'N'  # Ambiguous
-            else:
-                # H position - not directly analyzed for methylation
-                return 'H'  # Indicates this is a context position, not methylation
+        if site_upper == 'HCG':
+            if position_in_site == 0:  # H position
+                return 'H'  # Context base, not methylatable
+            elif position_in_site == 1:  # C position
+                if ref_base == 'C':
+                    return 'M' if seq_base == 'C' else ('U' if seq_base == 'T' else 'N')
+            elif position_in_site == 2:  # G position
+                if ref_base == 'G':
+                    return 'M' if seq_base == 'G' else ('U' if seq_base == 'A' else 'N')
+                    
+        elif site_upper == 'GCH':
+            if position_in_site == 0:  # G position
+                if ref_base == 'G':
+                    return 'M' if seq_base == 'G' else ('U' if seq_base == 'A' else 'N')
+            elif position_in_site == 1:  # C position
+                if ref_base == 'C':
+                    return 'M' if seq_base == 'C' else ('U' if seq_base == 'T' else 'N')
+            elif position_in_site == 2:  # H position
+                return 'H'  # Context base, not methylatable
+                
+        elif site_upper == 'CG':
+            if position_in_site == 0:  # C position
+                if ref_base == 'C':
+                    return 'M' if seq_base == 'C' else ('U' if seq_base == 'T' else 'N')
+            elif position_in_site == 1:  # G position
+                if ref_base == 'G':
+                    return 'M' if seq_base == 'G' else ('U' if seq_base == 'A' else 'N')
         
-        return 'N'  # Default to ambiguous
+        return 'N'  # Default
     
     def analyze_sequence(self, seq_record, ref_seq):
         """Analyze methylation pattern for one sequence."""

@@ -72,7 +72,7 @@ class MethylyzerSLURM:
 # Load required modules
 module purge
 module load python/3.8
-module load ncbi_blast
+module load ncbi_blast/2.15.0
 
 # Set up environment
 set -e  # Exit on any error
@@ -230,20 +230,24 @@ echo "Working directory: $(pwd)"
             extract_dir = input_path / "extracted"
             
             # Build bsExtract command with custom arguments
-            extract_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsExtract.py *.db -dest {extract_dir}"
+            extract_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsExtract.py *.db --dest {extract_dir}"
             
             # Add optional arguments
-            extract_cmd += f" -min_len {self.extract_settings['min_len']}"
-            extract_cmd += f" -min_bs {self.extract_settings['min_bs']}"
-            extract_cmd += f" -strand {self.extract_settings['strand']}"
+            extract_cmd += f" --min-len {self.extract_settings['min_len']}"
+            extract_cmd += f" --min-bs {self.extract_settings['min_bs']}"
+            extract_cmd += f" --strand {self.extract_settings['strand']}"
             
             if self.extract_settings['uniques']:
-                extract_cmd += " -uniques"
+                extract_cmd += " --uniques"
             
             commands = [
                 f"cd {input_path}",
                 extract_cmd
             ]
+
+            print(f"  Debug - self.extract_settings: {self.extract_settings}")
+            print(f"  Debug - uniques setting: {self.extract_settings['uniques']}")
+            print(f"  Debug - extract_cmd: {extract_cmd}")
             
             dependencies = job_ids if 1 in self.steps else None
             script = self.create_sbatch_script(f"bsExtract_{input_path.name}", commands, dependencies)
@@ -343,7 +347,7 @@ Examples:
                        help='Minimum read length for bsExtract (bp or percentage, e.g. "80%%")')
     parser.add_argument('--min-bs', type=int, default=95,
                        help='Minimum bisulfite conversion rate for bsExtract (0-100, default: 95)')
-    parser.add_argument('--uniques', action='store_true', default=True,
+    parser.add_argument('--uniques', action='store_true',
                        help='Deduplicate reads by methylation pattern in bsExtract')
     parser.add_argument('--strand', default='ab',
                        help='Strands to extract (a/b/ab, default: ab)')

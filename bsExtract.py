@@ -18,6 +18,76 @@ from datetime import datetime
 from os import mkdir, path
 
 ##############################################################################
+
+class meTable:
+    def __init__(self, contig, BS=95, unambig=True, **kwargs):
+        self.BS = BS / 100.0
+        self.__head__ = []
+        self.__offsets__ = {}
+        self.__sites__ = {}        
+        self.ref = contig[0]
+        self.seqs = {seq.id: seq for seq in contig[1:]}
+        
+        # DICT of LAMBDA functions
+        self.__rules__ = {
+            'locus': lambda x: self.ref.id,
+            'seqID': lambda x: x.id
+        }
+        
+        # default sites
+        if not kwargs: 
+            kwargs = dict(CG=1, GC=2)
+            
+        for k, v in kwargs.items():
+            try: 
+                assert type(v) is int and v != 0
+            except: 
+                raise IOError('Site parameters must be in format GC=2, etc.')
+            # add site to Header
+            self.__head__ += [k]
+            # get list of instances of site
+            self.__sites__[k] = self.__match__(k, v)
+            self.__offsets__[k] = v
+            # make new rule for methylation site k
+            self.__rules__[k] = lambda x, y=k: self.__score__(x, y)
+            
+        self.__head__ = ['locus', 'seqID'] + sorted(self.__head__)
+        self.__checkBS__()
+        
+        # remove overlapping sites from each list of positions
+        if unambig:
+            self.__sites__ = {k: self.__pare__(k, self.__sites__[k])
+                            for k in kwargs.keys()}
+    
+    def __checkBS__(self):
+        """This is the key bisulfite conversion filter that was more permissive"""
+        B = self.BS / (1 - self.BS)
+        C = self.__pare__('C', self.__match__('C', 1))
+        D = lambda x, y: sum([x.seq[c].upper() == y for c in C if c < len(x.seq)])        
+        self.seqs = {i: j for i, j in self.seqs.items() if D(j, 'T') >= B * D(j, 'C')}
+    
+    def __getitem__(self, i):
+        if type(i) == str:
+            return [self.__rules__[j](self.seqs[i]) for j in self.__head__]
+        else:
+            seq_values = list(self.seqs.values())  # Python 3 fix
+            return [self.__rules__[j](seq_values[i]) for j in self.__head__]
+    
+    def __len__(self):
+        return len(self.seqs)
+    
+    def __match__(self, M, N):
+        """Get bp positions of all instances of site M (methylated at bp N)"""
+        ref = str(self.ref.seq).upper()
+        return [n + N - 1 for n in range(len(ref)) if ref.find(M, n) == n]
+    
+    def __pare__(self, K, I):
+        """List all bp position from list I that do not overlap with a methylation site other than K"""
+        return sorted(set(I) - set(
+            [j for k in self.__head__[2:] if k != K for j in self.__sites__.get(k, [])]))
+
+##############################################################################
+
 def snowflake(seqs, sites):
     """Deduplicate reads by unique endogenous methylation pattern at monitored sites."""
     U = {''.join([str(seq.seq[c].upper()) for c in sites if c < len(seq.seq)]): seq for seq in seqs}
@@ -37,6 +107,7 @@ def snowflake(seqs, sites):
     return [U[k] for k in K]
             
 ##############################################################################
+
 def unpack(db_path, dest_dir=None,
            loci=None, strands=['ab'],
            methyl=None, min_len='100', min_bs=95, 
@@ -53,13 +124,26 @@ def unpack(db_path, dest_dir=None,
     
     print(f"Sample name: {sample_name}")
     
-    # Fix strand handling - convert 'ab' to individual strands
+    # Handle strands argument (default 'ab')
     if isinstance(strands, str):
-        if 'ab' in strands or strands == 'ab':
+        strands = strands.lower().strip()
+        if strands == 'ab':
             strands = ['a', 'b']
+        elif strands in ('a', 'b'):
+            strands = [strands]
         else:
-            strands = list(strands.lower())
-    strands = set([s for strand_group in strands for s in strand_group if s in 'ab'])
+            # Accept comma-separated or other separators
+            strands = [s.strip() for s in strands.replace(',', ' ').split() if s.strip() in ('a', 'b')]
+    else:
+        # If list, normalize
+        strands = [s.lower() for s in strands if s.lower() in ('a', 'b')]
+
+    # Remove duplicates and ensure at least something
+    strands = list(set(strands))
+    if not strands:
+        strands = ['a', 'b']  # fallback to both
+
+    print(f"Processing strands: {strands}")
     
     methyl = methyl or {'CG': 1, 'GC': 2}
     
@@ -106,6 +190,7 @@ def unpack(db_path, dest_dir=None,
         for strand in strands:
             key = (locus, strand)
             print(f"\n--- Processing: locus={locus}, strand={strand} ---")
+            print(f"  Strands being processed: {strands}")
             
             # Fetch reference - try exact match first, then without strand suffix
             ref_seq = None
@@ -152,9 +237,24 @@ def unpack(db_path, dest_dir=None,
                     
             print(f"  Passed length filter ({min_len}): {len(length_passed)}")
             
-            # BS conversion filter (simplified - you can enhance this)
-            bs_passed = length_passed  # For now, keeping it simple
-            print(f"  Passed BS filter (min {min_bs}%): {len(bs_passed)} (currently pass-all)")
+            # BS conversion filter 
+            if len(length_passed) > 0:
+
+                contig = [ref_rec] + [SeqRecord(Seq(seq_str), id=read_id) 
+                            for read_id, seq_str in length_passed]
+    
+                # Apply meTable filtering with the same parameters as old pipeline
+                try:
+                    data = meTable(contig, BS=min_bs, **methyl)
+                    bs_passed = [(seq.id, str(seq.seq)) for seq in data.seqs.values()]
+                except Exception as e:
+                    print(f"  Warning: meTable filtering failed: {e}")
+                    # Fallback to passing all reads if meTable fails
+                    bs_passed = length_passed
+            else:
+                bs_passed = []
+
+            print(f"  Passed BS filter (min {min_bs}%): {len(bs_passed)} (meTable filtering)")
             
             # Create SeqRecords
             seq_records = []
@@ -214,22 +314,22 @@ if __name__ == '__main__':
         description="Extract filtered/deduplicated single-molecule FASTA from bsAlign DB + QC report"
     )
     parser.add_argument('database', help="bsAlign output SQLite database (.db)")
-    parser.add_argument('-dest', default=None, help="Output directory")
-    parser.add_argument('-loci', nargs='*', default=[], help="Locus IDs")
-    parser.add_argument('-strand', default='ab', help="Strands to extract (a/b/ab)")
-    parser.add_argument('-min_len', default='100', help="Min length (bp or e.g. '80%%')")
-    parser.add_argument('-min_bs', type=int, default=95, help="Min bisulfite conversion rate (0-100)")
-    parser.add_argument('-uniques', action='store_true', help="Deduplicate by methylation pattern")
-    parser.add_argument('-Sites', type=str, default=None,
+    parser.add_argument('--dest', default=None, help="Output directory")
+    parser.add_argument('--loci', nargs='*', default=[], help="Locus IDs")
+    parser.add_argument('--strand', default='ab', help="Strands to extract (a/b/ab)")
+    parser.add_argument('--min-len', default='100', help="Min length (bp or e.g. '80%%')")
+    parser.add_argument('--min-bs', type=int, default=95, help="Min bisulfite conversion rate (0-100)")
+    parser.add_argument('--uniques', action='store_true', help="Deduplicate by methylation pattern")
+    parser.add_argument('--sites', type=str, default=None,
                         help="Methylation contexts, e.g. 'CG=1,GC=2,CC=1'")
-    parser.add_argument('-chrom', default=None, help="Only loci from this chromosome")
+    parser.add_argument('--chrom', default=None, help="Only loci from this chromosome")
     parser.add_argument('--sample-name', default=None, 
                         help="Sample name for output files (default: use directory name)")
     
     args = parser.parse_args()
     
     sites = {'CG': 1, 'GC': 2}
-    if args.Sites:
+    if args.sites:
         sites = dict(item.split('=') for item in args.Sites.split(','))
         sites = {k: int(v) for k, v in sites.items()}
     
