@@ -106,7 +106,6 @@ def check_IDs(records):
 def deaminate(source, strand='ab'):
     """
     Perform in silico bisulfite conversion using the modern faconvert tool.
-    Replaces the old fastools-based implementation.
     """
     seqs = []
 
@@ -115,8 +114,6 @@ def deaminate(source, strand='ab'):
         # Determine conversion flag for faconvert
         # Assuming: empty string or nothing = C->T (Watson/'a' strand)
         # "GA" = G->A (Crick/'b' strand)
-        
-        # conv_type = "GA" if i == 'b' else ""
 
         # Run faconvert and capture its stdout directly
         try:
@@ -138,14 +135,13 @@ def deaminate(source, strand='ab'):
                     check=True,
                     text=True
                 )
-
-            
+    
         except CalledProcessError as e:
             raise RuntimeError(f"faconvert failed for strand '{i}': {e.stderr.strip()}")
 
         # Parse the converted sequences directly from stdout
         for seq in SeqIO.parse(StringIO(result.stdout), 'fasta'):
-            # For 'b' strand: reverse complement after conversion (matches original behavior)
+            # For 'b' strand: reverse complement after conversion
             if i == 'b':
                 seq.seq = seq.seq.reverse_complement()
 
@@ -155,10 +151,8 @@ def deaminate(source, strand='ab'):
 
             seqs.append(seq)
 
-    # Write final combined output (same naming convention as original)
-    output_file = suffix(source, strand)  # assuming you have this helper function
-    # If you use change_extension() in reNewed, you can swap to that instead:
-    # output_file = change_extension(source, strand)
+    # Write final combined output 
+    output_file = suffix(source, strand) 
 
     with open(output_file, 'w') as handle:
         SeqIO.write(seqs, handle, 'fasta')
@@ -170,7 +164,7 @@ def deaminate(source, strand='ab'):
 def parse(whichFile):
     total_alignments = 0
     for record in NCBIXML.parse(open(whichFile, 'r')):
-        # Get best alignments (same as before)
+        # Get best alignments
         EI = [(alignment.hsps[0].expect, i)
               for i, alignment in enumerate(record.alignments)]
         EI.sort()
@@ -182,10 +176,10 @@ def parse(whichFile):
                 
                 Q = record.query.split()[0].split('.')
                 S = alignment.accession.split('.')
-                qStr, Sstr = Q[-1], S[-1]
+                qStr, sStr = Q[-1], S[-1]
                 qID, sID = '.'.join(Q[:-1]), '.'.join(S[:-1])
 
-                yield sID, qID, hsp.expect, hsp.sbjct_start, hsp.sbjct_end, hsp.query_start, hsp.query_end, hsp.sbjct, hsp.query
+                yield sID, qID, qStr, sStr, hsp.expect, hsp.sbjct_start, hsp.sbjct_end, hsp.query_start, hsp.query_end, hsp.sbjct, hsp.query
             else:  
                 break
     print(f"Debug: parse() yielded {total_alignments} total alignments")
@@ -240,15 +234,34 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
             # Use in-memory indexing instead of SQLite-based indexing
             print("Creating sequence index...")
             seqs_index = {}
+
+            # Index original sequences (needed for reamination)
+            for record in SeqIO.parse(seqs, 'fasta'):
+                seqs_index[record.id] = record
+                # Also index with strand suffixes for lookup
+                seqs_index[record.id + '.a'] = record
+                seqs_index[record.id + '.b'] = record
+
+            for record in SeqIO.parse(refs, 'fasta'):
+                seqs_index[record.id] = record
+                seqs_index[record.id + '.a'] = record
+                seqs_index[record.id + '.b'] = record
+
+            # Additionally, index deaminated sequences for strand detection
+            for record in SeqIO.parse(Q, 'fasta'):
+                seqs_index[record.id + '_deaminated'] = record
+
+            for record in SeqIO.parse(S, 'fasta'):
+                seqs_index[record.id + '_deaminated'] = record
             
             # Index Q file
             if os.path.exists(Q):
-                for record in SeqIO.parse(Q, 'fasta'):
+                for record in SeqIO.parse(seqs, 'fasta'):
                     seqs_index[record.id] = record
             
             # Index S file  
             if os.path.exists(S):
-                for record in SeqIO.parse(S, 'fasta'):
+                for record in SeqIO.parse(refs, 'fasta'):
                     seqs_index[record.id] = record
                     
             print(f"Total sequences in index: {len(seqs_index)}")
@@ -289,29 +302,15 @@ def put_data(seqs, refs, dest, mask=False, strand='ab', update=False):
                      '(read, locus, strand)')
         
         failed_lookups = 0
-        for S_hit, Q_hit, e, s5, s3, q5, q3, sBS, qBS in parse(X):
+        for S_hit, Q_hit, qStr, sStr, e, s5, s3, q5, q3, sBS, qBS in parse(X):
             # Use the clean IDs from parse()
             qID = Q_hit.split(' ', 1)[0].strip()
             sID = S_hit.split(' ', 1)[0].strip()
             
-            # Try to find query sequence - try exact match first, then with suffixes
-            qSeq = None
-            qStr = 'a'  # default
-            for potential_qid in [qID, qID + '.a', qID + '.b']:
-                if potential_qid in seqs_index:
-                    qSeq = seqs_index[potential_qid]
-                    qStr = 'b' if potential_qid.endswith('.b') else 'a'
-                    break
-            
-            # Try to find subject sequence - try exact match first, then with suffixes  
-            sSeq = None
-            sStr = 'a'  # default
-            for potential_sid in [sID, sID + '.a', sID + '.b']:
-                if potential_sid in seqs_index:
-                    sSeq = seqs_index[potential_sid]
-                    sStr = 'b' if potential_sid.endswith('.b') else 'a'
-                    break
-            
+            # Get original sequences for reamination (strand info already extracted)
+            qSeq = seqs_index.get(qID)
+            sSeq = seqs_index.get(sID)
+                        
             if qSeq is None or sSeq is None:
                 failed_lookups += 1
                 if failed_lookups <= 10:  # Show first 10 failures
