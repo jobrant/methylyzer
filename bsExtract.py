@@ -237,33 +237,58 @@ def unpack(db_path, dest_dir=None,
                     
             print(f"  Passed length filter ({min_len}): {len(length_passed)}")
             
-            # BS conversion filter 
+            # BS conversion filter using meTable (creates seq_records directly)
             if len(length_passed) > 0:
+                print(f"  DEBUG: Input to meTable: {len(length_passed)} sequences")
 
-                contig = [ref_rec] + [SeqRecord(Seq(seq_str), id=read_id) 
-                            for read_id, seq_str in length_passed]
-    
-                # Apply meTable filtering with the same parameters as old pipeline
+                # Create SeqRecords for meTable processing
+                temp_seq_records = [SeqRecord(Seq(seq_str), id=read_id, description="") 
+                                for read_id, seq_str in length_passed]
+                
+                # Apply strand-specific processing like the old pipeline
+                current_ref = ref_rec
+                if strand == 'b':
+                    print(f"  DEBUG: Applying strand 'b' reverse complement")
+                    # Reverse complement both reference and sequences for b strand
+                    current_ref = SeqRecord(ref_rec.seq.reverse_complement(), 
+                                        id=ref_rec.id, description="")
+                    temp_seq_records = [SeqRecord(seq.seq.reverse_complement(), 
+                                                id=seq.id, description="") 
+                                    for seq in temp_seq_records]
+                
+                contig = [current_ref] + temp_seq_records
+                print(f"  DEBUG: meTable input contig size: {len(contig)}")
+                
+                # Apply meTable filtering
                 try:
                     data = meTable(contig, BS=min_bs, **methyl)
-                    bs_passed = [(seq.id, str(seq.seq)) for seq in data.seqs.values()]
+                    print(f"  DEBUG: meTable output sequences: {len(data.seqs)}")
+                    # Extract the filtered SeqRecord objects directly (skip reference)
+                    seq_records = list(data.seqs.values())[1:]  # Skip first element (reference)
+                    
+                    # Convert back if we reverse complemented
+                    if strand == 'b':
+                        seq_records = [SeqRecord(seq.seq.reverse_complement(), 
+                                            id=seq.id, description="") 
+                                    for seq in seq_records]
+                    
+                    print(f"  Passed BS filter (min {min_bs}%): {len(seq_records)} (meTable filtering)")
+                    
                 except Exception as e:
+                    print(f"  ERROR: meTable filtering failed: {e}")
+                    print(f"  DEBUG: Exception type: {type(e)}")
+                    import traceback
+                    traceback.print_exc()
                     print(f"  Warning: meTable filtering failed: {e}")
-                    # Fallback to passing all reads if meTable fails
-                    bs_passed = length_passed
+                    # Fallback: create SeqRecords from length_passed
+                    seq_records = [SeqRecord(Seq(seq_str.upper()), id=read_id, description="") 
+                                for read_id, seq_str in length_passed]
             else:
-                bs_passed = []
+                seq_records = []
 
-            print(f"  Passed BS filter (min {min_bs}%): {len(bs_passed)} (meTable filtering)")
-            
-            # Create SeqRecords
-            seq_records = []
-            for read_id, seq_str in bs_passed:
-                full_seq = Seq(seq_str.upper())
-                seq_records.append(SeqRecord(full_seq, id=read_id, description=""))
-            
+            # Now seq_records is ready for the deduplication step
             final_before_dedup = len(seq_records)
-            
+
             # Deduplicate if requested
             if uniques and monitored_positions:
                 before_dedup = len(seq_records)
@@ -275,7 +300,7 @@ def unpack(db_path, dest_dir=None,
             
             # Store report counts
             report[key] = [aligned_count, aligned_count - len(length_passed),
-                           len(length_passed) - len(bs_passed), final_before_dedup - final_count, final_count]
+                           len(length_passed) - len(seq_records), final_before_dedup - final_count, final_count]
             
             if not seq_records:
                 continue
