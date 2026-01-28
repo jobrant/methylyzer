@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+"""
+bsFreqs.py - Generate methylation frequency tables and coded maps from bsExtract FASTA files
+
+PATCHED VERSION: Fixed coded CSV generation with proper patch-filling logic
+to match the original meTools.py / MethMap.py behavior for methylscaper visualization.
+
+Value encoding (matching methylscaper's preprocessSingleMolecule output):
+   2  = methylated site (dark tick at actual C)
+  -2  = unmethylated site (dark tick at actual C)  
+   1  = fill between consecutive methylated sites (colored patch)
+  -1  = fill between consecutive unmethylated sites (colored patch)
+   0  = boundary (transition between meth/unmeth) or background (grey)
+  '.'  = no data (gap, N, or beyond read)
+"""
 
 import argparse
 import os
@@ -110,113 +124,223 @@ class MethylationAnalyzer:
         return results
     
     def calculate_frequencies(self, output_dir, file_info):
-        """Calculate methylation frequencies for each site type."""
+        """Calculate methylation frequencies at methylatable cytosines."""
         strand = file_info['strand']
         locus = file_info['locus']
         
-        print(f"Calculating frequencies for {len(self.sequences)} sequences...")
+        print(f"Calculating methylation frequencies for {len(self.sequences)} sequences...")
         
-        for site in self.sites:
-            print(f"Processing site: {site}")
-            positions = self.site_positions.get(site, [])
+        for site_type in self.sites:
+            print(f"Processing {site_type} sites")
+            start_positions = self.site_positions.get(site_type, [])
             
-            if not positions:
-                print(f"No {site} sites found in reference sequence")
+            if not start_positions:
+                print(f"No {site_type} sites found")
                 continue
             
-            # Initialize counters for each position
-            position_counts = {}
-            for pos in positions:
-                position_counts[pos] = Counter()
+            # Cytosine is always at offset 1 in both HCG (H C G) and GCH (G C H)
+            cytosine_offset = 1
             
-            # Analyze each sequence
-            valid_sequences = 0
+            # Calculate actual cytosine positions
+            c_positions = [start + cytosine_offset for start in start_positions]
+            
+            # Verify reference bases at cytosine positions (first 5 for debug)
+            ref_str = str(self.ref_seq).upper()
+            
+            position_base_counts = defaultdict(Counter)
+            total_reads_at_pos = defaultdict(int)
+
             for seq_record in self.sequences:
-                seq_results = self.analyze_sequence(seq_record, self.ref_seq)
-                site_data = seq_results[site]
+                seq_str = str(seq_record.seq).upper()
                 
-                has_data = False
-                for site_info in site_data:
-                    pos = site_info['position']
-                    pattern = site_info['pattern']
-                    if 'M' in pattern or 'U' in pattern:  # Has some readable data
-                        has_data = True
-                    position_counts[pos][pattern] += 1
-                
-                if has_data:
-                    valid_sequences += 1
-            
-            # Write frequency file with new naming convention
-            freq_file = os.path.join(output_dir, f"{site}-{strand}-{locus}.freqs.csv")
-            print(f"Writing {site} frequencies to {freq_file}")
-            
-            with open(freq_file, 'w') as f:
-                f.write(f"# Methylation frequencies for {site} sites\n")
-                f.write(f"# Locus: {locus}\n")
-                f.write(f"# Strand: {strand}\n")
-                f.write(f"# Reference sequence: {len(self.ref_seq)} bp\n")
-                f.write(f"# Total sequences analyzed: {len(self.sequences)}\n")
-                f.write(f"# Sequences with data: {valid_sequences}\n")
-                f.write(f"# {site} sites found: {len(positions)}\n\n")
-                
-                # Header
-                f.write("Position,Site_Pattern,Count,Frequency\n")
-                
-                # Data for each position
-                for pos in sorted(positions):
-                    total_reads = sum(position_counts[pos].values())
-                    if total_reads == 0:
+                for start in start_positions:
+                    c_pos = start + cytosine_offset  # 0-based position of the C
+                    
+                    if c_pos >= len(self.ref_seq) or c_pos >= len(seq_str):
                         continue
-                        
-                    for pattern, count in position_counts[pos].most_common():
-                        freq = count / total_reads if total_reads > 0 else 0
-                        f.write(f"{pos + 1},{pattern},{count},{freq:.4f}\n")
-    
-    def write_csv_data(self, output_dir, file_info):
-        """Write coded CSV files for plotting (optional)."""
+                    
+                    ref_base = self.ref_seq[c_pos].upper()
+                    read_base = seq_str[c_pos]
+                    
+                    if ref_base != 'C':
+                        continue
+                    
+                    if read_base in {'-', 'N'}:
+                        continue
+                    
+                    # Always use forward logic: reads are already oriented correctly by alignment
+                    # Methylated → C, Unmethylated → T
+                    if read_base == 'C':
+                        methylated_base = 'C'
+                    elif read_base == 'T':
+                        methylated_base = 'T'
+                    else:
+                        methylated_base = read_base  # rare errors
+                    
+                    position_base_counts[c_pos][methylated_base] += 1
+                    total_reads_at_pos[c_pos] += 1
+            
+            # Prepare output file
+            out_file = os.path.join(output_dir, f"{site_type}-cytosines-{strand}-{locus}.tsv")
+            print(f"  → Writing to {out_file}")
+            
+            with open(out_file, 'w') as f:
+                f.write(f"# Methylation at {site_type} cytosines\n")
+                f.write(f"# Locus: {locus}\n")
+                f.write(f"# Strand: {strand} ({'top' if strand == 'A' else 'bottom'} strand capture)\n")
+                f.write(f"# Reference length: {len(self.ref_seq)} bp\n")
+                f.write(f"# Sequences analyzed: {len(self.sequences)}\n")
+                f.write(f"# {site_type} sites found: {len(start_positions)}\n\n")
+                
+                f.write("Pos\tA\tC\tG\tT\n")
+                
+                for pos in sorted(position_base_counts.keys()):  # pos is 0-based cytosine position
+                    counts = position_base_counts[pos]
+                    total = total_reads_at_pos[pos]
+                    
+                    if total == 0:
+                        continue
+                    
+                    fa = counts['A'] / total
+                    fc = counts['C'] / total
+                    fg = counts['G'] / total
+                    ft = counts['T'] / total
+                    
+                    # Print pos as 1-based genomic position
+                    f.write(f"{pos + 1}\t{fa:.6f}\t{fc:.6f}\t{fg:.6f}\t{ft:.6f}\n")
+
+    def write_coded_map_csv(self, output_dir, file_info):
+        """
+        Write SEPARATE coded CSV files for each site type with proper patch-filling.
+        
+        This replicates the original meTools.py __score__() and MethMap.py logic:
+        - Sites marked with 2 (methylated) or -2 (unmethylated)
+        - Positions between sites filled based on flanking site states
+        - Boundaries (mixed states) marked as 0 (grey)
+        
+        Value encoding (matching methylscaper's preprocessSingleMolecule output):
+          2  = methylated site (dark tick)
+         -2  = unmethylated site (dark tick)
+          1  = fill between methylated sites (patch color)
+         -1  = fill between unmethylated sites (patch color)
+          0  = boundary or background (grey)
+          .  = missing data
+        """
         strand = file_info['strand']
         locus = file_info['locus']
         
-        print("Writing CSV matrix files...")
+        print("Writing coded map CSV files with patch-filling...")
         
-        for site in self.sites:
-            positions = self.site_positions.get(site, [])
-            if not positions:
+        # Value encoding matching methylscaper's output (INTEGERS, not floats!)
+        METH_SITE = 2         # methylated cytosine site (dark tick)
+        UNMETH_SITE = -2      # unmethylated cytosine site (dark tick)
+        METH_FILL = 1         # fill between methylated sites (patch color)
+        UNMETH_FILL = -1      # fill between unmethylated sites (patch color)
+        BOUNDARY = 0          # boundary or background (grey)
+        NO_DATA = '.'         # Missing data (gap, N, beyond read)
+        
+        ref_length = len(self.ref_seq)
+        ref_str = str(self.ref_seq).upper()
+        
+        # Process each site type separately (creates separate files)
+        for site_type in self.sites:
+            site_start_positions = self.site_positions.get(site_type, [])
+            if not site_start_positions:
+                print(f"  No {site_type} sites found, skipping...")
                 continue
             
-            csv_file = os.path.join(output_dir, f"{site}-{strand}-{locus}.matrix.csv")
-            print(f"Writing {site} matrix to {csv_file}")
+            # Get cytosine positions (offset 1 for both HCG and GCH)
+            # These are the actual methylatable positions (0-based)
+            cytosine_positions = sorted([start + 1 for start in site_start_positions 
+                                         if start + 1 < ref_length])
+            
+            # Output file per site type
+            csv_file = os.path.join(output_dir, f"{site_type}-{strand}-{locus}_map.csv")
+            print(f"  Writing {site_type} map to {csv_file}")
+            print(f"    {len(cytosine_positions)} cytosine positions")
             
             with open(csv_file, 'w') as f:
                 # Header
-                f.write("Sequence_ID")
-                for pos in sorted(positions):
-                    f.write(f",{site}_{pos + 1}")
+                f.write("#Seq")
+                for pos in range(1, ref_length + 1):
+                    f.write(f"\tC{pos}")
                 f.write("\n")
                 
-                # Data rows
+                # Process each sequence
                 for seq_record in self.sequences:
-                    seq_results = self.analyze_sequence(seq_record, self.ref_seq)
-                    site_data = seq_results[site]
-                    
+                    seq_str = str(seq_record.seq).upper()
                     f.write(seq_record.id)
                     
-                    # Create position lookup
-                    pos_lookup = {info['position']: info['pattern'] for info in site_data}
-                    
-                    for pos in sorted(positions):
-                        pattern = pos_lookup.get(pos, 'N' * len(site))
-                        # Convert pattern to numeric code (M=1, U=0, N/H=-1)
-                        numeric_pattern = []
-                        for state in pattern:
-                            if state == 'M':
-                                numeric_pattern.append('1')
-                            elif state == 'U':
-                                numeric_pattern.append('0')
+                    # Step 1: Determine methylation state at each cytosine position
+                    # state: 1 = methylated (C), -1 = unmethylated (T), 0 = ambiguous/no data
+                    site_states = {}
+                    for c_pos in cytosine_positions:
+                        if c_pos >= len(seq_str):
+                            site_states[c_pos] = 0  # Beyond read
+                        else:
+                            read_base = seq_str[c_pos]
+                            ref_base = ref_str[c_pos]
+                            
+                            if read_base in {'-', 'N'} or ref_base != 'C':
+                                site_states[c_pos] = 0  # No data or not a C in reference
+                            elif read_base == 'C':
+                                site_states[c_pos] = 1   # Methylated
+                            elif read_base == 'T':
+                                site_states[c_pos] = -1  # Unmethylated
                             else:
-                                numeric_pattern.append('-1')
-                        f.write(f",{'_'.join(numeric_pattern)}")
+                                site_states[c_pos] = 0   # Ambiguous
+                    
+                    # Step 2: Find informative sites (non-zero states)
+                    informative_sites = [(pos, site_states[pos]) for pos in cytosine_positions 
+                                         if site_states[pos] != 0]
+                    
+                    # Step 3: Build the coded vector for this sequence
+                    coded_vector = [BOUNDARY] * ref_length  # Start with all background
+                    
+                    if informative_sites:
+                        # Mark site positions and fill between them
+                        for idx, (site_pos, state) in enumerate(informative_sites):
+                            # Mark the site itself
+                            if state == 1:
+                                coded_vector[site_pos] = METH_SITE      # 2.0
+                            else:  # state == -1
+                                coded_vector[site_pos] = UNMETH_SITE    # -2.0
+                            
+                            # Fill positions between this site and the next
+                            if idx < len(informative_sites) - 1:
+                                next_pos, next_state = informative_sites[idx + 1]
+                                
+                                # Determine fill value based on flanking states
+                                # This matches meTools.py: ' +-'[(J[i]+J[j])//2]
+                                if state == 1 and next_state == 1:
+                                    fill_value = METH_FILL      # 1 - both methylated
+                                elif state == -1 and next_state == -1:
+                                    fill_value = UNMETH_FILL    # -1 - both unmethylated
+                                else:
+                                    fill_value = BOUNDARY       # 0 - mixed states
+                                
+                                # Fill positions between sites (exclusive of site positions)
+                                for fill_pos in range(site_pos + 1, next_pos):
+                                    coded_vector[fill_pos] = fill_value
+                    
+                    # Step 4: Write the vector, handling missing data
+                    for ref_pos in range(ref_length):
+                        if ref_pos >= len(seq_str):
+                            f.write(f"\t{NO_DATA}")
+                        elif seq_str[ref_pos] in {'-', 'N'}:
+                            f.write(f"\t{NO_DATA}")
+                        else:
+                            f.write(f"\t{coded_vector[ref_pos]}")
+                    
                     f.write("\n")
+            
+            print(f"    Written {len(self.sequences)} sequences")
+
+    def write_csv_data(self, output_dir, file_info):
+        """Write coded CSV files for plotting (optional) - DEPRECATED, use write_coded_map_csv instead."""
+        # Redirect to the new method
+        self.write_coded_map_csv(output_dir, file_info)
+
 
 def parse_filename(filename):
     """Parse bsExtract filename to get strand and locus info."""
@@ -250,7 +374,7 @@ def find_fasta_files(input_path):
 def main():
     parser = argparse.ArgumentParser(
         description="Generate methylation frequency tables from bsExtract FASTA files",
-        epilog="Example: python bsFreq.py /path/to/extracted_files/ -o methylation_analysis"
+        epilog="Example: python bsFreqs.py /path/to/extracted_files/ -o methylation_analysis"
     )
     parser.add_argument('input_path', 
                        help="Directory containing bsExtract output files (A_*.fa, B_*.fa) or single FASTA file")
@@ -322,14 +446,14 @@ def main():
         
         # Generate CSV if requested
         if args.csv:
-            analyzer.write_csv_data(args.output, file_info)
+            analyzer.write_coded_map_csv(args.output, file_info)
         
         print()
     
     print(f"Analysis complete! Results in: {args.output}")
     print("\nOutput files:")
-    freq_files = glob.glob(os.path.join(args.output, "*.freqs.csv"))
-    matrix_files = glob.glob(os.path.join(args.output, "*.matrix.csv"))
+    freq_files = glob.glob(os.path.join(args.output, "*.tsv"))
+    matrix_files = glob.glob(os.path.join(args.output, "*_map.csv"))
     
     for f in sorted(freq_files + matrix_files):
         print(f"  {os.path.basename(f)}")
