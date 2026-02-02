@@ -7,6 +7,24 @@ Successor to reAminator, this tool orchestrates:
 2. bsExtract.py - Extraction of quality reads  
 3. bsFreqs.py   - Frequency analysis of methylation sites
 
+Output structure:
+  sample_dir/
+  ├── *.db                    # bsAlign database
+  ├── extracted/              # Full filtered dataset
+  │   ├── A_locus_sample.fa
+  │   └── report.tsv
+  ├── subsampled/             # Random subsample for plotting
+  │   ├── A_locus_sample.fa
+  │   └── report.tsv
+  ├── frequencies/            # Frequency tables from full data
+  │   ├── HCG-cytosines-A-locus.tsv
+  │   └── GCH-cytosines-A-locus.tsv
+  └── frequencies_subsampled/ # Freq tables + CSV maps from subsampled
+      ├── HCG-cytosines-A-locus.tsv
+      ├── GCH-cytosines-A-locus.tsv
+      ├── HCG-A-locus_map.csv
+      └── GCH-A-locus_map.csv
+
 Author: Jason Orr Brant, 2026
 """
 
@@ -37,11 +55,14 @@ class MethylyzerSLURM:
             'min_len': '90%',
             'min_bs': 95,
             'uniques': False,
-            'strand': 'ab'
+            'strand': 'ab',
+            'subsample': 1000, # Default: subsample 1000 reads
+            'subsample_seed': 42 # The answer!
         }
         #bsFreqs settings
         self.freqs_settings = {
-            'csv': False
+            'freq_source': 'both',
+            'sites': ['HCG', 'GCH']
         }
         
     def create_sbatch_script(self, job_name, commands, dependencies=None):
@@ -72,7 +93,7 @@ class MethylyzerSLURM:
 # Load required modules
 module purge
 module load python/3.8
-module load ncbi_blast/2.15.0
+module load ncbi_blast
 
 # Set up environment
 set -e  # Exit on any error
@@ -230,7 +251,7 @@ echo "Working directory: $(pwd)"
             extract_dir = input_path / "extracted"
             
             # Build bsExtract command with custom arguments
-            extract_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsExtract.py *.db --dest {extract_dir}"
+            extract_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsExtract.py *.db"
             
             # Add optional arguments
             extract_cmd += f" --min-len {self.extract_settings['min_len']}"
@@ -239,6 +260,11 @@ echo "Working directory: $(pwd)"
             
             if self.extract_settings['uniques']:
                 extract_cmd += " --uniques"
+
+            # Add subsampling if enabled
+            if self.extract_settings['subsample'] and self.extract_settings['subsample'] > 0:
+                extract_cmd += f" --subsample {self.extract_settings['subsample']}"
+                extract_cmd += f" --subsample-seed {self.extract_settings['subsample_seed']}"
             
             commands = [
                 f"cd {input_path}",
@@ -259,30 +285,44 @@ echo "Working directory: $(pwd)"
         
         # Step 3: bsFreq (depends on step 2)
         if 3 in self.steps:
-            extract_dir = input_path / "extracted"
-            freq_dir = input_path / "frequencies"
+            freq_source = self.freqs_settings['freq_source']
+            freq_commands = []
             
-            # Build bsFreq command
-            freq_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsFreqs.py {extract_dir} -o {freq_dir}"
+            # Run on full data (extracted/)
+            if freq_source in ('full', 'both'):
+                extracted_dir = input_path / "extracted"
+                freq_dir = input_path / "frequencies"
+                
+                # Frequency tables only (no CSV maps for full data)
+                freq_cmd = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsFreqs.py {extracted_dir} -o {freq_dir}"
+                freq_cmd += f" -s {' '.join(self.freqs_settings['sites'])}"
+                freq_commands.append(f"echo 'Running bsFreqs on full data...'")
+                freq_commands.append(freq_cmd)
+                print(f"  bsFreqs (full): {extracted_dir} → {freq_dir}")
             
-            # Add CSV flag if requested
-            if self.freqs_settings['csv']:
-                freq_cmd += " --csv"
+            # Run on subsampled data (subsampled/)
+            if freq_source in ('subsampled', 'both'):
+                subsampled_dir = input_path / "subsampled"
+                freq_subsampled_dir = input_path / "frequencies_subsampled"
+                
+                # Frequency tables + CSV maps for subsampled data
+                freq_cmd_sub = f"python /orange/kladde/KLADDE_SCRIPTS/Methylyzer/bsFreqs.py {subsampled_dir} -o {freq_subsampled_dir} --csv"
+                freq_cmd_sub += f" -s {' '.join(self.freqs_settings['sites'])}"
+                
+                freq_commands.append(f"echo 'Running bsFreqs on subsampled data (with CSV maps)...'")
+                freq_commands.append(freq_cmd_sub)
+                print(f"  bsFreqs (subsampled + CSV): {subsampled_dir} → {freq_subsampled_dir}")
             
-            print(f"  Debug - bsFreq command: {freq_cmd}") 
-            
-            commands = [
-                f"cd {input_path}",
-                freq_cmd
-            ]
-            
-            dependencies = [job_ids[-1]] if job_ids else None
-            script = self.create_sbatch_script(f"bsFreqs_{input_path.name}", commands, dependencies)
-            job_id = self.submit_job(script, f"bsFreqs_{input_path.name}")
-            if job_id:
-                job_ids.append(job_id)
-            else:
-                return False
+            if freq_commands:
+                commands = [f"cd {input_path}"] + freq_commands
+                
+                dependencies = [job_ids[-1]] if job_ids else None
+                script = self.create_sbatch_script(f"bsFreqs_{input_path.name}", commands, dependencies)
+                job_id = self.submit_job(script, f"bsFreqs_{input_path.name}")
+                if job_id:
+                    job_ids.append(job_id)
+                else:
+                    return False
         
         return job_ids
     
@@ -292,6 +332,8 @@ echo "Working directory: $(pwd)"
         print(f"Steps to run: {self.steps}")
         print(f"Reference file: {refs_file}")
         print(f"Input directories: {len(input_dirs)}")
+        print(f"Subsample: {self.extract_settings['subsample']} reads")
+        print(f"Freq source: {self.freqs_settings['freq_source']}")
         
         if not Path(refs_file).exists():
             print(f"Error: Reference file does not exist: {refs_file}")
@@ -320,8 +362,15 @@ def main():
         description="Methylyzer: Bisulfite sequencing analysis workflow with SLURM job submission",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Output structure:
+  sample_dir/
+  ├── extracted/              # Full filtered dataset
+  ├── subsampled/             # Random subsample for plotting  
+  ├── frequencies/            # Frequency tables from full data
+  └── frequencies_subsampled/ # Freq tables + CSV maps from subsampled
+
 Examples:
-  # Process single directory
+  # Process single directory (default: subsample=1000, freq-source=both)
   python methylyzer.py -r references.fa sample_001/
   
   # Process multiple directories
@@ -329,6 +378,12 @@ Examples:
   
   # Only run extraction and frequencies (skip alignment)  
   python methylyzer.py -r references.fa -s 23 sample_001/
+  
+  # Disable subsampling (run full pipeline only)
+  python methylyzer.py -r references.fa --subsample 0 --freq-source full sample_001/
+  
+  # Custom subsample size
+  python methylyzer.py -r references.fa --subsample 500 sample_001/
   
   # Custom SLURM settings
   python methylyzer.py -r references.fa --account mylab --time 8:00:00 --mem 32G sample_001/
@@ -351,10 +406,18 @@ Examples:
                        help='Deduplicate reads by methylation pattern in bsExtract')
     parser.add_argument('--strand', default='ab',
                        help='Strands to extract (a/b/ab, default: ab)')
+    parser.add_argument('--subsample', type=int, default=1000,
+                       help='Randomly subsample reads for plotting (default: 1000). '
+                            'Set to 0 to disable subsampling.')
+    parser.add_argument('--subsample-seed', type=int, default=42,
+                       help='Random seed for reproducible subsampling (default: 42)')
     
     # bsFreqs arguments
-    parser.add_argument('--csv', action='store_true',
-                       help="Also generate CSV matrices for plotting")
+    parser.add_argument('--freq-source', choices=['full', 'subsampled', 'both'], default='both',
+                       help='Run bsFreqs on full, subsampled, or both (default: both). '
+                            'CSV map files are only generated for subsampled data.')
+    parser.add_argument('--sites', nargs='+', default=['HCG', 'GCH'],
+                        help='Methylation sites for bsFreqs (default: HCG GCH)')
 
     
     # SLURM options
@@ -400,7 +463,12 @@ Examples:
     workflow.extract_settings['strand'] = args.strand
 
     # Update bsFreqs settings
-    workflow.freqs_settings['csv'] = args.csv
+    workflow.freqs_settings['freq_source'] = args.freq_source
+    workflow.freqs_settings['sites'] = args.sites
+
+    # subsample=0 means no subsampling, subsample>0 means subsample to that number
+    workflow.extract_settings['subsample'] = args.subsample if args.subsample > 0 else None
+    workflow.extract_settings['subsample_seed'] = args.subsample_seed
     
     # Run workflow
     success = workflow.run(args.directories, args.references)
