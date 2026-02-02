@@ -6,11 +6,23 @@ bsExtract.py - Modern minimal extractor for bsAlign database
 Extracts filtered, deduplicated single-molecule FASTA files per locus
 and generates a useful QC report.tsv
 For downstream use with methylscaper (R package)
+
+Output structure:
+  sample_dir/
+  ├── extracted/        # Full filtered dataset
+  │   ├── A_locus_sample.fa
+  │   ├── B_locus_sample.fa
+  │   └── report.tsv
+  └── subsampled/       # Random subsample for plotting (if --subsample)
+      ├── A_locus_sample.fa
+      ├── B_locus_sample.fa
+      └── report.tsv
 """
 
 import argparse
 import os
 import sqlite3
+import random
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -108,10 +120,55 @@ def snowflake(seqs, sites):
             
 ##############################################################################
 
+def subsample_reads(seq_records, n_subsample, seed=None):
+    """
+    Randomly subsample reads for plotting purposes.
+    
+    Args:
+        :param seq_records: List of SeqRecord objects
+        :param n_subsample: Maximum number of reads to keep (0 or None = no subsampling)
+        :param seed: Random seed for reproducibility (default: 42)
+
+    Returns:
+        Subsampled list of SeqRecord objects
+    """ 
+
+    if not n_subsample or n_subsample <= 0:
+        return seq_records
+    
+    if len(seq_records) <= n_subsample:
+        return seq_records
+    
+    if seed is not None:
+        random.seed(seed)
+
+    return random.sample(seq_records, n_subsample)
+
+##############################################################################
+
 def unpack(db_path, dest_dir=None,
            loci=None, strands=['ab'],
            methyl=None, min_len='100', min_bs=95, 
-           uniques=False, chrom=None, sample_name_override=None):
+           uniques=False, chrom=None, sample_name_override=None,
+           subsample=None, subsample_seed=None):
+    """
+    Extract filtered reads from bsAlign database.
+    
+    Args:
+        :param db_path: PAth to SQLite database from bsAlign
+        :param dest_dir: Output directory
+        :param loci: list of locis IDs to extract (None = all)
+        :param strands: Strands to extract ('a', 'b', or 'ab')
+        :param methyl: Methylation contextx dict (default: {'CG': 1, "GC": 2})
+        :param min_len: Minimum read length (bp or percentage like '90%')
+        :param min_bs: Minimum bisulfite conversion rate (0-100)
+        :param uniques: If True, depuplicate by methylation pattern
+        :param chrom: Only extract loci from this chromosome
+        :param sample_name_override: Override sample name for output files
+        :param subsample: Number of reads to randomly subsample for plotting (None/0 = no subsampling)
+        :param subsample_seed: Random seed for reproducible subsampling
+    """
+
     loci = loci or []
 
     # Extract sample name
@@ -149,8 +206,22 @@ def unpack(db_path, dest_dir=None,
     
     # prepare target directory
     if not dest_dir: 
-        dest_dir = os.path.splitext(db_path)[0] + "_extracted"
-    os.makedirs(dest_dir, exist_ok=True)    
+        dest_dir = os.path.dirname(os.path.abspath(db_path))
+
+    extracted_dir = os.path.join(dest_dir, "extracted")
+    os.makedirs(extracted_dir, exist_ok=True)
+
+    # make subsample dir if needed
+    subsampled_dir = None
+    if subsample and subsample > 0:
+        subsampled_dir = os.path.join(dest_dir, "subsampled")
+        os.makedirs(subsampled_dir, exist_ok=True)
+    
+    print(f"Output directories:")
+    print(f"  Full data: {extracted_dir}")
+    if subsampled_dir:
+        print(f"  Subsampled: {subsampled_dir}")
+
     
     conn = sqlite3.connect(db_path)
     curs = conn.cursor()
@@ -185,6 +256,7 @@ def unpack(db_path, dest_dir=None,
     
     total_files = 0
     total_reads_final = 0
+    total_reads_subsampled = 0
     
     for locus in loci:
         for strand in strands:
@@ -298,46 +370,127 @@ def unpack(db_path, dest_dir=None,
             final_count = len(seq_records)
             print(f"  Final reads written: {final_count}")
             
-            # Store report counts
-            report[key] = [aligned_count, aligned_count - len(length_passed),
-                           len(length_passed) - len(seq_records), final_before_dedup - final_count, final_count]
-            
             if not seq_records:
+                # Store report counts (no subsampling if no reads)
+                report[key] = [aligned_count, aligned_count - len(length_passed),
+                           len(length_passed) - len(seq_records), final_before_dedup - final_count, final_count]
                 continue
             
-            # Write FASTA - sample name and clean locus name
+            # Write FASTA 
             clean_locus = locus.split(':')[0] if ':' in locus else locus
-            filename = f"{strand.upper()}_{sample_name}_{clean_locus}.fa"
-            out_path = path.join(dest_dir, filename)
+            filename = f"{strand.upper()}_{clean_locus}_{sample_name}.fa"
+            out_path = path.join(extracted_dir, filename)
             
             with open(out_path, 'w') as handle:
                 SeqIO.write([ref_rec] + seq_records, handle, 'fasta')
             
+            print(f"  Wrote {final_count} reads → {out_path}")
+
+            # Subsample and write separate file for plotting if requested
+            subsampled_count = 0
+            if subsampled_dir:
+                if final_count > subsample:
+                    subsampled_records = subsample_reads(seq_records, subsample, subsample_seed)
+                    subsampled_count = len(subsampled_records)
+                else:
+                    # Use all reads if fewer than subsample threshold
+                    subsampled_records = seq_records
+                    subsampled_count = final_count
+                
+                # Write to subsampled directory (same filename, different dir)
+                subsample_path = os.path.join(subsampled_dir, filename)
+                
+                with open(subsample_path, 'w') as handle:
+                    SeqIO.write([ref_rec] + subsampled_records, handle, 'fasta')
+                
+                if final_count > subsample:
+                    print(f"  Wrote {subsampled_count} subsampled reads → {subsample_path}")
+                else:
+                    print(f"  Wrote {subsampled_count} reads (no subsampling needed) → {subsample_path}")
+                    
+                total_reads_subsampled += subsampled_count
+            
+            # Store report counts
+            report[key] = [aligned_count, aligned_count - len(length_passed),
+                           len(length_passed) - final_before_dedup, 
+                           final_before_dedup - final_count, final_count, subsampled_count]
+            
             total_reads_final += final_count
             total_files += 1
-            print(f"Wrote {final_count} reads → {out_path}")
+
+    conn.close()
     
-    # Write report
-    report_path = path.join(dest_dir, 'report.tsv')
+    # Write report to extracted/ directory
+    report_path = os.path.join(extracted_dir, 'report.tsv')
+    _write_report(report_path, db_path, min_len, min_bs, uniques, subsample, report)
+    
+    # Write report to subsampled/ directory if it exists
+    if subsampled_dir:
+        subsample_report_path = os.path.join(subsampled_dir, 'report.tsv')
+        _write_report(subsample_report_path, db_path, min_len, min_bs, uniques, subsample, report)
+    
+    print(f"\n{'='*60}")
+    print(f"Extraction complete:")
+    print(f"  {total_reads_final} final reads in {total_files} FASTA files")
+    print(f"  Full data: {extracted_dir}")
+    if subsampled_dir:
+        print(f"  {total_reads_subsampled} subsampled reads for plotting")
+        print(f"  Subsampled: {subsampled_dir}")
+    print(f"{'='*60}")
+
+
+def _write_report(report_path, db_path, min_len, min_bs, uniques, subsample, report):
+    """Write extraction report to TSV file."""
     with open(report_path, 'w') as rpt:
         rpt.write(f"# Generated: {datetime.now()}\n")
         rpt.write(f"# Source DB: {db_path}\n")
-        rpt.write(f"# Filters: min_len={min_len}, min_bs={min_bs}%, uniques={uniques}\n")
-        rpt.write("#LOCUS\tSTRAND\tALIGNED\tFAILED_LEN\tFAILED_BS\tREMOVED_DUPE\tFINAL\n")
+        rpt.write(f"# Filters: min_len={min_len}, min_bs={min_bs}%, uniques={uniques}")
+        if subsample:
+            rpt.write(f", subsample={subsample}")
+        rpt.write("\n")
+        
+        header = "#LOCUS\tSTRAND\tALIGNED\tFAILED_LEN\tFAILED_BS\tREMOVED_DUPE\tFINAL"
+        if subsample:
+            header += "\tSUBSAMPLED"
+        rpt.write(header + "\n")
         
         for (locus, strand) in sorted(report.keys(), key=lambda x: (x[0], x[1])):
             counts = report[(locus, strand)]
-            rpt.write('\t'.join([locus, strand.upper()] + [str(c) for c in counts]) + '\n')
+            if subsample:
+                rpt.write('\t'.join([locus, strand.upper()] + [str(c) for c in counts]) + '\n')
+            else:
+                # Don't include subsampled column if not subsampling
+                rpt.write('\t'.join([locus, strand.upper()] + [str(c) for c in counts[:5]]) + '\n')
     
-    print(f"\nExtraction complete:")
-    print(f"  {total_reads_final} final reads in {total_files} FASTA files")
-    print(f"  Report written to: {report_path}")
+    print(f"  Report written: {report_path}")
         
 ##############################################################################
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Extract filtered/deduplicated single-molecule FASTA from bsAlign DB + QC report"
+        description="Extract filtered/deduplicated single-molecule FASTA from bsAlign database",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Output structure:
+  <dest_dir>/
+  ├── extracted/        # Full filtered dataset
+  │   ├── A_locus_sample.fa
+  │   └── report.tsv
+  └── subsampled/       # Random subsample (if --subsample)
+      ├── A_locus_sample.fa
+      └── report.tsv
+
+Examples:
+  # Basic extraction
+  python bsExtract.py sample.db
+  
+  # With subsampling for plotting
+  python bsExtract.py sample.db --subsample 1000
+  
+  # Custom filters
+  python bsExtract.py sample.db --min-len 90% --min-bs 95 --uniques
+        """
     )
+
     parser.add_argument('database', help="bsAlign output SQLite database (.db)")
     parser.add_argument('--dest', default=None, help="Output directory")
     parser.add_argument('--loci', nargs='*', default=[], help="Locus IDs")
@@ -350,6 +503,11 @@ if __name__ == '__main__':
     parser.add_argument('--chrom', default=None, help="Only loci from this chromosome")
     parser.add_argument('--sample-name', default=None, 
                         help="Sample name for output files (default: use directory name)")
+    parser.add_argument('--subsample', type=int, default=None, 
+                        help="Randomly subsample reads for plotting (default: no subsampling). "
+                             "Creates separate *_subsample.fa files with at most N reads.")
+    parser.add_argument('--subsample-seed', type=int, default=42,
+                        help="Random seed for reproducible subsampling (default: 42)")
     
     args = parser.parse_args()
     
@@ -368,5 +526,7 @@ if __name__ == '__main__':
         min_bs=args.min_bs,
         uniques=args.uniques,
         chrom=args.chrom,
-        sample_name_override=args.sample_name
+        sample_name_override=args.sample_name,
+        subsample=args.subsample,
+        subsample_seed=args.subsample_seed
     )
