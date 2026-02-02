@@ -7,7 +7,7 @@ Methylyzer is a Python-based pipeline for processing, aligning, and analyzing bi
 Methylyzer is the successor to the reAminator pipeline (Darst & Riva, University of Florida).
 
 ![Example methylation map](mapit_image.png)
-*Example output: Side-by-side heatmaps of endogenous CG methylation (HCG, left, red=methylated) and accessibility (GCH, right, yellow=accessible) at a single locus. Each row is one molecule; molecules are ordered by PCA.*
+*Example output: Side-by-side heatmaps of endogenous CG methylation (left, red=methylated) and accessibility (right, yellow=accessible) at a single locus. Each row is one molecule; molecules are ordered by PCA. Site types are auto-detected from the analysis (HCG/GCH for standard MAPit, CG/GC for dinucleotide analysis).*
 
 ---
 
@@ -37,9 +37,7 @@ Optional downstream plotting is handled by `batch_methylscaper_plots.R` and `plo
 - `faconvert` (for in silico bisulfite conversion)
 
 **R 4.0+ (for plotting, optional)**
-- `seriation`
-- `data.table`
-- `Rfast`
+- No additional R packages required — `batch_methylscaper_plots.R` is self-contained and uses only base R functions (including SVD-based PCA ordering).
 
 On HPC systems with module environments:
 ```bash
@@ -73,6 +71,9 @@ python methylyzer.py -r references.fa sample_001/ sample_002/ sample_003/
 
 # Wildcard
 python methylyzer.py -r references.fa sample_*/
+
+# Dinucleotide analysis (CG + GC, includes GCG sites)
+python methylyzer.py -r references.fa --sites CG GC sample_001/
 ```
 
 ### Running steps individually
@@ -86,6 +87,12 @@ python bsExtract.py sample.db --dest sample_dir/ --min-len 90% --min-bs 95
 
 # Step 3: Frequencies
 python bsFreqs.py extracted/ -o frequencies/
+
+# Step 3: With CSV maps for plotting
+python bsFreqs.py subsampled/ -o frequencies_subsampled/ --csv
+
+# Step 3: Custom sites
+python bsFreqs.py extracted/ -o frequencies/ -s CG GC
 ```
 
 ---
@@ -157,7 +164,22 @@ Generates methylation frequency tables and optional coded CSV matrices for visua
 
 **Frequency tables (.tsv):** Per-position base frequencies (A, C, G, T) at each methylatable cytosine. Methylated cytosines retain C; unmethylated cytosines are converted to T by bisulfite treatment.
 
-**CSV map files (.csv):** Full-length molecule × position matrices with numeric codes for methylscaper-style visualization.
+**CSV map files (`--csv`):** Full-length molecule × position matrices with numeric codes for methylscaper-style visualization. One file per site type, named `{SITE}-{strand}-{locus}_map.csv`. The maps use patch-filling between consecutive sites to produce continuous colored regions in the heatmap visualization.
+
+**CSV map coding scheme:**
+
+| Value | Meaning |
+|:-----:|---------|
+| `2` | Methylated cytosine (C retained at site) |
+| `-2` | Unmethylated cytosine (C→T conversion at site) |
+| `1` | Fill between two adjacent methylated sites |
+| `-1` | Fill between two adjacent unmethylated sites |
+| `0` | Fill between mixed-state sites, or outside site regions |
+| `.` | No data (gap, N, beyond read, ambiguous base) |
+
+The same coding is used for all site types. The R plotting script applies different color mappings based on which panel the file is assigned to (left/endogenous → red/black, right/accessibility → yellow/black).
+
+**Cytosine offset detection:** The position of the methylatable cytosine within each site pattern is automatically detected. For example, `CG` has the cytosine at position 0, while `HCG`, `GCH`, and `GC` all have it at position 1. This means any valid site pattern can be used without manual offset configuration.
 
 ```bash
 # Standard analysis
@@ -166,8 +188,8 @@ python bsFreqs.py extracted/ -o frequencies/
 # With CSV maps for plotting
 python bsFreqs.py subsampled/ -o frequencies_subsampled/ --csv
 
-# Custom methylation contexts (e.g., no endogenous CG methylation)
-python bsFreqs.py extracted/ -o frequencies/ --sites CG GC
+# Custom methylation contexts
+python bsFreqs.py extracted/ -o frequencies/ -s CG GC
 ```
 
 ---
@@ -180,8 +202,8 @@ By default, Methylyzer analyzes **HCG** (endogenous CG methylation) and **GCH** 
 
 The cytosine position is automatically detected from the pattern:
 
-| Pattern | Regex | Cytosine Position | Description |
-|---------|-------|:-----------------:|-------------|
+| Pattern | Regex | Cytosine Position (0-indexed) | Description |
+|---------|-------|:-----------------------------:|-------------|
 | `HCG` | `[ACT]CG` | 1 | CG methylation, excluding GCG |
 | `GCH` | `GC[ACT]` | 1 | GC accessibility, excluding GCG |
 | `CG` | `CG` | 0 | All CG dinucleotides (including GCG) |
@@ -210,10 +232,12 @@ For standard MAPit experiments, use the defaults (`HCG` + `GCH`). These exclude 
 
 If your experiment has **no endogenous CG methylation** (e.g., certain assay designs), you can safely include GCG sites:
 ```bash
-python bsFreqs.py extracted/ --sites CG GC
+python bsFreqs.py extracted/ -s CG GC
 # or via methylyzer:
-python methylyzer.py -r refs.fa sample_001/ --sites CG GC
+python methylyzer.py -r refs.fa --sites CG GC sample_001/
 ```
+
+The `--sites` argument is passed through to all bsFreqs invocations (both full and subsampled data), and the output filenames reflect the actual site types used (e.g., `CG-A-locus_map.csv` rather than `HCG-A-locus_map.csv`).
 
 ---
 
@@ -230,7 +254,7 @@ python methylyzer.py -r references.fa sample_001/
 This will:
 1. **Align** CCS reads to references (Step 1)
 2. **Extract** filtered reads to `extracted/` and subsample 1000 reads to `subsampled/` (Step 2)
-3. **Calculate frequencies** on both full and subsampled data (Step 3)
+3. **Calculate frequencies** on both full and subsampled data (Step 3) — CSV map files are automatically generated for the subsampled data only
 
 ### Output directory structure
 
@@ -252,8 +276,13 @@ sample_001/
 └── frequencies_subsampled/     # From subsampled data (Step 3)
     ├── HCG-cytosines-A-locus.tsv
     ├── GCH-cytosines-A-locus.tsv
-    └── A-locus_coded_map.csv   # CSV maps for visualization
+    ├── HCG-A-locus_map.csv     # Per-site CSV maps for visualization
+    ├── GCH-A-locus_map.csv
+    └── plots/                  # Generated by batch_methylscaper_plots.R
+        └── methylmap_A-locus.png
 ```
+
+> **Note:** When using `--sites CG GC`, the output filenames will use `CG` and `GC` instead of `HCG` and `GCH`.
 
 ### Full argument reference
 
@@ -262,7 +291,7 @@ usage: methylyzer.py [-h] -r REFERENCES [-s STEPS] [--min-len MIN_LEN]
                      [--min-bs MIN_BS] [--uniques] [--strand STRAND]
                      [--subsample SUBSAMPLE] [--subsample-seed SUBSAMPLE_SEED]
                      [--freq-source {full,subsampled,both}]
-                     [--sites SITES [SITES ...]] [--csv]
+                     [--sites SITES [SITES ...]]
                      [--account ACCOUNT] [--qos QOS] [--partition PARTITION]
                      [--time TIME] [--mem MEM] [--cpus CPUS] [--email EMAIL]
                      directories [directories ...]
@@ -290,9 +319,8 @@ usage: methylyzer.py [-h] -r REFERENCES [-s STEPS] [--min-len MIN_LEN]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--sites` | `HCG GCH` | Methylation contexts to analyze |
-| `--csv` | off | Generate CSV matrices for plotting |
-| `--freq-source` | `both` | Run on `full`, `subsampled`, or `both` |
+| `--sites` | `HCG GCH` | Methylation contexts to analyze (passed to both full and subsampled runs) |
+| `--freq-source` | `both` | Run on `full`, `subsampled`, or `both`. CSV maps are generated for subsampled data only. |
 
 **SLURM arguments:**
 
@@ -321,7 +349,7 @@ python methylyzer.py -r refs.fa --subsample 0 --freq-source full sample_001/
 # Custom subsample size with deduplication
 python methylyzer.py -r refs.fa --subsample 500 --uniques sample_001/
 
-# Different methylation contexts
+# Dinucleotide contexts (includes GCG sites)
 python methylyzer.py -r refs.fa --sites CG GC sample_001/
 
 # Custom SLURM settings
@@ -341,11 +369,20 @@ python methylyzer.py -r refs.fa --account mylab --time 8:00:00 --mem 64G sample_
 
 ### Batch plotting with R
 
-`batch_methylscaper_plots.R` generates methylscaper-style heatmaps from the coded CSV map files. It is self-contained and does not require the methylscaper R package.
+`batch_methylscaper_plots.R` generates methylscaper-style heatmaps from the per-site CSV map files. It is self-contained and does not require the methylscaper R package — PCA-based molecule ordering uses base R's `svd()`.
+
+The script automatically detects which site types are present in the input directory from filenames (e.g., `HCG-A-locus_map.csv` or `CG-A-locus_map.csv`) and assigns them to left (endogenous/red) and right (accessibility/yellow) panels. Site type assignment can be overridden with `--left-site` and `--right-site`.
+
+**Auto-detection priority:**
+- Left panel (endogenous, red/black): HCG > CG > WCG > first alphabetically
+- Right panel (accessibility, yellow/black): GCH > GC > second alphabetically
 
 ```bash
-# Basic usage
+# Basic usage (auto-detects site types)
 Rscript batch_methylscaper_plots.R /path/to/frequencies_subsampled/
+
+# Explicit site assignment
+Rscript batch_methylscaper_plots.R /path/to/frequencies_subsampled/ --left-site CG --right-site GC
 
 # With options
 Rscript batch_methylscaper_plots.R /path/to/frequencies_subsampled/ /path/to/plots/ \
@@ -354,6 +391,8 @@ Rscript batch_methylscaper_plots.R /path/to/frequencies_subsampled/ /path/to/plo
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--left-site` | auto-detect | Site type for left panel (endogenous/red) |
+| `--right-site` | auto-detect | Site type for right panel (accessibility/yellow) |
 | `--width` | 8 | Plot width (inches) |
 | `--height` | 10 | Plot height (inches) |
 | `--format` | `png` | Output format: `png`, `pdf`, or `both` |
@@ -393,9 +432,9 @@ The extracted FASTA files and CSV maps are also compatible with the [methylscape
 
 | File | Description |
 |------|-------------|
-| `batch_methylscaper_plots.R` | Command-line R script for batch heatmap generation |
+| `batch_methylscaper_plots.R` | Self-contained R script for batch heatmap generation (includes PCA ordering and `plotSequence()`) |
 | `plot_methylscaper.sh` | SLURM wrapper for batch plotting |
-| `seqPlot.R` | `plotSequence()` function for methylscaper-style heatmaps |
+| `seqPlot.R` | Standalone `plotSequence()` function for methylscaper-style heatmaps |
 
 ### Legacy / Reference
 
@@ -410,7 +449,6 @@ These files are from the original reAminator pipeline (Python 2.7, Darst & Riva 
 | `MethMap.py` | MethylMapper map/frequency engine |
 | `methylmapper.py` | MethylMapper main application |
 | `preprocessSingleMolecule.R` | R-based alignment for methylscaper |
-| `initialOrder.R` | Molecule ordering (PCA/seriation) for methylscaper |
 
 ---
 
