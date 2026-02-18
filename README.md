@@ -2,7 +2,7 @@
 
 **Bisulfite sequencing analysis pipeline for single-molecule methylation mapping**
 
-Methylyzer is a Python-based pipeline for processing, aligning, and analyzing bisulfite-converted sequencing reads from single-molecule methylation assays such as MAPit (Methyltransferase Accessibility Protocol for individual Templates). It produces per-molecule methylation maps and frequency tables suitable for visualization with [methylscaper](https://bioconductor.org/packages/methylscaper/) or custom plotting tools.
+Methylyzer is a Python-based pipeline for processing, aligning, and analyzing bisulfite-converted sequencing reads from single-molecule methylation assays such as MAPit (Methyltransferase Accessibility Protocol for individual Templates). It produces per loci frequency tables and per-molecule methylation maps suitable for visualization with [methylscaper](https://bioconductor.org/packages/methylscaper/) or custom plotting tools.
 
 Methylyzer is the successor to the reAminator pipeline (Darst & Riva, University of Florida).
 
@@ -50,7 +50,7 @@ module load R/4.2  # for plotting
 
 Clone the repository and ensure the scripts are accessible:
 ```bash
-git clone https://github.com/your-username/Methylyzer.git
+git clone https://github.com/jobrant/Methylyzer.git
 cd Methylyzer
 ```
 
