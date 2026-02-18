@@ -72,6 +72,8 @@ load_bsFreqs_csv_direct <- function(hcg_file, gch_file, method = "PCA") {
   gch_temp_neg1 <- gch_matrix == -1
   gch_recoded[gch_matrix == -2] <- -1
   gch_recoded[gch_temp_neg1] <- -2
+  gch_recoded[gch_matrix == 3] <- 5 # maps to blue for wrong bases
+  gch_recoded[gch_matrix == 4] <- 4.5 # fill between wrong bases
   
   # HCG transformation (for red/black display on LEFT side of plot)
   hcg_recoded <- hcg_matrix
@@ -80,6 +82,8 @@ load_bsFreqs_csv_direct <- function(hcg_file, gch_file, method = "PCA") {
   hcg_recoded[hcg_matrix == 0] <- 2.5
   hcg_recoded[hcg_matrix == -1] <- 2
   hcg_recoded[hcg_matrix == -2] <- 1
+  hcg_recoded[hcg_matrix == 3] <- 5
+  hcg_recoded[hcg_matrix == 4] <- 4.5
   
   # Combine into toClust format: GCH columns first, then HCG columns
   toClust <- cbind(gch_recoded, hcg_recoded)
@@ -115,9 +119,10 @@ plotSequence <- function(orderObject, plotFast = TRUE,
   
   myCols <- c(
     "darkgoldenrod2", "yellow", "gray62", "black",
-    "gray80", "white", "gray80", "black", "gray62", "red", "darkred"
+    "gray80", "white", "gray80", "black", "gray62", 
+    "red", "darkred", "lightblue", "blue", "blue"
   )
-  myBreaks <- c(-5, -4, -3, -2.5, -2, -1, 0, 1, 2, 2.5, 3, 4)
+  myBreaks <- c(-5, -4, -3, -2.5, -2, -1, 0, 1, 2, 2.5, 3, 4, 4.5, 5, 6)
   
   if (nrow(toClust) == 1) {
     input_HCG <- t(as.matrix(input_HCG))
