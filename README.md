@@ -168,16 +168,18 @@ Generates methylation frequency tables and optional coded CSV matrices for visua
 
 **CSV map coding scheme:**
 
-| Value | Meaning |
-|:-----:|---------|
-| `2` | Methylated cytosine (C retained at site) |
-| `-2` | Unmethylated cytosine (C→T conversion at site) |
-| `1` | Fill between two adjacent methylated sites |
-| `-1` | Fill between two adjacent unmethylated sites |
-| `0` | Fill between mixed-state sites, or outside site regions |
-| `.` | No data (gap, N, beyond read, ambiguous base) |
+| Value | Meaning | Color |
+|:-----:|---------|-------|
+| `2` | Methylated cytosine (C retained at site) | Red (HCG) / Yellow (GCH) |
+| `-2` | Unmethylated cytosine (C→T conversion at site) | Black |
+| `1` | Fill between two adjacent methylated sites | Dark red (HCG) / Gold (GCH) |
+| `-1` | Fill between two adjacent unmethylated sites | Black |
+| `3` | Wrong base at site (A, G, etc. — potential indel shift) | Blue |
+| `4` | Fill between two adjacent wrong-base sites | Light blue |
+| `0` | Fill between mixed-state sites, or outside site regions | Gray |
+| `.` | No data (gap, N, beyond read, ambiguous base) | White |
 
-The same coding is used for all site types. The R plotting script applies different color mappings based on which panel the file is assigned to (left/endogenous → red/black, right/accessibility → yellow/black).
+The same coding is used for all site types. The R plotting script applies different color mappings based on which panel the file is assigned to (left/endogenous → red/black, right/accessibility → yellow/black). The blue diagnostic coloring appears on both panels.
 
 **Cytosine offset detection:** The position of the methylatable cytosine within each site pattern is automatically detected. For example, `CG` has the cytosine at position 0, while `HCG`, `GCH`, and `GC` all have it at position 1. This means any valid site pattern can be used without manual offset configuration.
 
@@ -414,6 +416,27 @@ Output is placed in `frequencies_subsampled/plots/` within each sample directory
 ### Using methylscaper directly
 
 The extracted FASTA files and CSV maps are also compatible with the [methylscaper](https://bioconductor.org/packages/methylscaper/) R/Bioconductor package and its Shiny app for interactive exploration.
+
+### Diagnostic: Detecting indel shifts (blue coloring)
+
+Occasionally, reads may appear with no methylation signal at any site — neither endogenous methylation (red) nor accessibility (yellow). While this could represent genuinely inaccessible, unmethylated DNA, it may also indicate an **indel alignment problem** where the read is shifted relative to the reference, causing the methylatable cytosine positions to fall on the wrong bases.
+
+The pipeline includes a diagnostic feature to detect this: when a read has **A, G, or any base other than C or T** at an expected cytosine position, that site is colored **blue** instead of being treated as missing data.
+
+**Interpreting blue in your plots:**
+
+| Pattern | Interpretation |
+|---------|----------------|
+| No blue anywhere | Reads are correctly aligned; C/T calls at all sites |
+| Scattered blue spots | Random sequencing errors or rare misalignments |
+| Blue patch starting mid-read, continuing to end | Classic indel frame shift — an insertion or deletion upstream caused all downstream positions to be offset |
+| Entire read is blue | Severe alignment problem or wrong locus |
+
+**Example:** A read that aligns correctly for positions 1–50, then shows continuous blue from position 51 onward, likely has an unresolved indel around position 50 that shifted the remaining sequence out of frame.
+
+This diagnostic helps distinguish between:
+- **Biological signal** (all-black reads = genuine full conversion with no accessibility)
+- **Technical artifact** (blue reads = alignment/indel correction failure)
 
 ---
 
