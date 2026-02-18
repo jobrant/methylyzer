@@ -264,8 +264,8 @@ class MethylationAnalyzer:
                         methylated_base = read_base  # rare errors
                     
                     # Optional: Debug first few positions
-                    if c_pos in c_positions[:2]:  # first two sites
-                        print(f"DEBUG: Pos {c_pos+1} | read_base = {read_base} → counted as {methylated_base}")
+                    # if c_pos in c_positions[:2]:  # first two sites
+                    #     print(f"DEBUG: Pos {c_pos+1} | read_base = {read_base} → counted as {methylated_base}")
                     
                     position_base_counts[c_pos][methylated_base] += 1
                     total_reads_at_pos[c_pos] += 1
@@ -508,7 +508,7 @@ class MethylationAnalyzer:
                     seq_str = str(seq_record.seq).upper()
                     
                     # STEP 1: Determine methylation state at each cytosine site
-                    site_states = {}  # pos -> 2 (meth), -2 (unmeth), or None (no data)
+                    site_states = {}  # pos -> 2 (meth), -2 (unmeth), 3 (wrong base), or None (no data)
                     for c_pos in cytosine_positions_list:
                         if c_pos >= len(seq_str):
                             site_states[c_pos] = None
@@ -522,7 +522,7 @@ class MethylationAnalyzer:
                         elif read_base == 'T':
                             site_states[c_pos] = -2  # Unmethylated
                         else:
-                            site_states[c_pos] = None  # Ambiguous
+                            site_states[c_pos] = 3
                     
                     # STEP 2: Compute fill values between consecutive sites
                     # fill_regions[pos] = fill value for positions between site i and site i+1
@@ -541,6 +541,8 @@ class MethylationAnalyzer:
                             fill_val = 1     # Both methylated → fill
                         elif left_state == -2 and right_state == -2:
                             fill_val = -1    # Both unmethylated → fill
+                        elif left_state == 3 and right_state == 3:
+                            fill_val = 4
                         else:
                             fill_val = 0     # Mixed → boundary/gray
                         
