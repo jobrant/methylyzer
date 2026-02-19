@@ -20,7 +20,7 @@
 #'   Rscript batch_methylscaper_plots.R /path/to/frequencies/
 #'   Rscript batch_methylscaper_plots.R /path/to/frequencies/ --left-site CG --right-site GC
 #'
-#' Author: Kladde Lab, 2026
+#' Author: Jason Orr Brant, 2026
 
 # ==============================================================================
 # Load required functions
